@@ -179,3 +179,4 @@ alembic/versions
 my-scripts
 .env-main-backup
 supabase
+test-twilio.py
