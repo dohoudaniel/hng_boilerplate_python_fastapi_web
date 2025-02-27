@@ -173,3 +173,9 @@ cython_debug/
 #.idea/
 
 alembic/versions
+
+# Added this
+.env-supabase
+test-database.py
+.env-main-backup
+supabase
