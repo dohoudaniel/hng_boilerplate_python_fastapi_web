@@ -176,6 +176,6 @@ alembic/versions
 
 # Added this
 .env-supabase
-test-database.py
+my-scripts
 .env-main-backup
 supabase
