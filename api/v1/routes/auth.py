@@ -2,9 +2,7 @@ from datetime import timedelta
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from fastapi import (BackgroundTasks, Depends,
-                     status, APIRouter,
-                     Response, Request)
+from fastapi import BackgroundTasks, Depends, status, APIRouter, Response, Request, HTTPException
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 from typing import Annotated
@@ -14,8 +12,13 @@ from api.utils.success_response import auth_response, success_response
 from api.utils.send_mail import send_magic_link
 from api.v1.models import User
 from api.v1.schemas.user import Token
-from api.v1.schemas.user import (LoginRequest, UserCreate, EmailRequest,
-                                 ProfileData, UserData2)
+from api.v1.schemas.user import (
+    LoginRequest,
+    UserCreate,
+    EmailRequest,
+    ProfileData,
+    UserData2,
+)
 from api.v1.schemas.token import TokenRequest
 from api.v1.schemas.user import (MagicLinkRequest,
                                  ChangePasswordSchema,
@@ -26,6 +29,9 @@ from api.db.database import get_db
 from api.v1.services.user import user_service
 from api.v1.services.auth import AuthService
 from api.v1.services.profile import profile_service
+from api.v1.schemas.totp_device import TOTPDeviceRequestSchema, TOTPDeviceResponseSchema, TOTPTokenSchema, TOTPDeviceDataSchema
+from api.v1.services.totp import totp_service
+from api.utils.settings import settings
 
 auth = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -42,8 +48,7 @@ def register(request: Request, background_tasks: BackgroundTasks, response: Resp
 
     # create an organization for the user
     org = CreateUpdateOrganisation(
-        name=f"{user.email}'s Organisation",
-        email=user.email
+        name=f"{user.email}'s Organisation", email=user.email
     )
     organisation_service.create(db=db, schema=org, user=user)
     user_organizations = organisation_service.retrieve_user_organizations(user, db)
@@ -51,32 +56,31 @@ def register(request: Request, background_tasks: BackgroundTasks, response: Resp
     # Create access and refresh tokens
     access_token = user_service.create_access_token(user_id=user.id)
     refresh_token = user_service.create_refresh_token(user_id=user.id)
-    cta_link = 'https://anchor-python.teams.hng.tech/about-us'
+    cta_link = "https://anchor-python.teams.hng.tech/about-us"
 
     # Send email in the background
     background_tasks.add_task(
-        send_email, 
+        send_email,
         recipient=user.email,
-        template_name='welcome.html',
-        subject='Welcome to HNG Boilerplate',
+        template_name="welcome.html",
+        subject="Welcome to HNG Boilerplate",
         context={
-            'first_name': user.first_name,
-            'last_name': user.last_name,
-            'cta_link': cta_link
-        }
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "cta_link": cta_link,
+        },
     )
 
     response = auth_response(
         status_code=201,
-        message='User created successfully',
+        message="User created successfully",
         access_token=access_token,
         data={
-            'user': jsonable_encoder(
-                user,
-                exclude=['password', 'is_deleted', 'is_verified', 'updated_at']
+            "user": jsonable_encoder(
+                user, exclude=["password", "is_deleted", "is_verified", "updated_at"]
             ),
-            'organisations': user_organizations
-        }
+            "organisations": user_organizations,
+        },
     )
 
     # Add refresh token to cookies
@@ -100,8 +104,7 @@ def register_as_super_admin(request: Request, user: UserCreate, db: Session = De
     user = user_service.create_admin(db=db, schema=user)
     # create an organization for the user
     org = CreateUpdateOrganisation(
-        name=f"{user.email}'s Organisation",
-        email=user.email
+        name=f"{user.email}'s Organisation", email=user.email
     )
     organisation_service.create(db=db, schema=org, user=user)
     user_organizations = organisation_service.retrieve_user_organizations(user, db)
@@ -112,15 +115,14 @@ def register_as_super_admin(request: Request, user: UserCreate, db: Session = De
 
     response = auth_response(
         status_code=201,
-        message='User created successfully',
+        message="User created successfully",
         access_token=access_token,
         data={
-            'user': jsonable_encoder(
-                user,
-                exclude=['password', 'is_deleted', 'is_verified', 'updated_at']
+            "user": jsonable_encoder(
+                user, exclude=["password", "is_deleted", "is_verified", "updated_at"]
             ),
-            'organisations': user_organizations
-        }
+            "organisations": user_organizations,
+        },
     )
 
     # Add refresh token to cookies
@@ -145,6 +147,7 @@ def login(request: Request, login_request: LoginRequest, db: Session = Depends(g
     user = user_service.authenticate_user(
         db=db, email=login_request.email, password=login_request.password
     )
+    totp_service.check_2fa_status_and_verify(db, user.id, login_request.totp_code)
     user_organizations = organisation_service.retrieve_user_organizations(user, db)
 
     # Generate access and refresh tokens
@@ -153,15 +156,14 @@ def login(request: Request, login_request: LoginRequest, db: Session = Depends(g
 
     response = auth_response(
         status_code=200,
-        message='Login successful',
+        message="Login successful",
         access_token=access_token,
         data={
-            'user': jsonable_encoder(
-                user,
-                exclude=['password', 'is_deleted', 'is_verified', 'updated_at']
+            "user": jsonable_encoder(
+                user, exclude=["password", "is_deleted", "is_verified", "updated_at"]
             ),
-            'organisations': user_organizations
-        }
+            "organisations": user_organizations,
+        },
     )
 
     # Add refresh token to cookies
@@ -180,7 +182,7 @@ def login(request: Request, login_request: LoginRequest, db: Session = Depends(g
 @auth.post("/logout", status_code=status.HTTP_200_OK)
 @limiter.limit("5/minute")  # Limit to 5 requests per minute per IP
 def logout(
-    request: Request, 
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(user_service.get_current_user),
@@ -211,9 +213,7 @@ def refresh_access_token(
     )
 
     response = auth_response(
-        status_code=200,
-        message='Login successful',
-        access_token=access_token
+        status_code=200, message="Login successful", access_token=access_token
     )
 
     # Add refresh token to cookies
@@ -243,19 +243,19 @@ async def request_signin_token(request: Request, background_tasks: BackgroundTas
     user_service.save_login_token(db, user, token, token_expiry)
 
     # Send mail notification
-    link = f'https://anchor-python.teams.hng.tech/login/verify-token?token={token}'
+    link = f"https://anchor-python.teams.hng.tech/login/verify-token?token={token}"
 
     # Send email in the background
     background_tasks.add_task(
-        send_email, 
+        send_email,
         recipient=user.email,
-        template_name='request-token.html',
-        subject='Request Token Login',
+        template_name="request-token.html",
+        subject="Request Token Login",
         context={
-            'first_name': user.first_name,
-            'last_name': user.last_name,
-            'link': link
-        }
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "link": link,
+        },
     )
 
     return success_response(
@@ -266,8 +266,7 @@ async def request_signin_token(request: Request, background_tasks: BackgroundTas
 @auth.post("/verify-token", status_code=status.HTTP_200_OK, response_model=auth_response)
 @limiter.limit("5/minute")  # Limit to 5 requests per minute per IP
 async def verify_signin_token(
-    request: Request, 
-    token_schema: TokenRequest, db: Session = Depends(get_db)
+    request: Request, token_schema: TokenRequest, db: Session = Depends(get_db)
 ):
     """Verify the 6-digit sign-in token and log in the user"""
 
@@ -278,18 +277,16 @@ async def verify_signin_token(
     access_token = user_service.create_access_token(user_id=user.id)
     refresh_token = user_service.create_refresh_token(user_id=user.id)
 
-
     response = auth_response(
         status_code=200,
-        message='Login successful',
+        message="Login successful",
         access_token=access_token,
         data={
-            'user': jsonable_encoder(
-                user,
-                exclude=['password', 'is_deleted', 'is_verified', 'updated_at']
+            "user": jsonable_encoder(
+                user, exclude=["password", "is_deleted", "is_verified", "updated_at"]
             ),
-            'organisations': user_organizations
-        }
+            "organisations": user_organizations,
+        },
     )
 
     # Add refresh token to cookies
@@ -309,9 +306,11 @@ async def verify_signin_token(
 @auth.post("/magic-link", status_code=status.HTTP_200_OK)
 @limiter.limit("5/minute")  # Limit to 5 requests per minute per IP
 def request_magic_link(
-    request: Request, 
-    requests: MagicLinkRequest, background_tasks: BackgroundTasks,
-    response: Response, db: Session = Depends(get_db)
+    request: Request,
+    requests: MagicLinkRequest,
+    background_tasks: BackgroundTasks,
+    response: Response,
+    db: Session = Depends(get_db),
 ):
     user = user_service.fetch_by_email(db=db, email=requests.email)
     magic_link_token = user_service.create_access_token(user_id=user.id)
@@ -320,11 +319,11 @@ def request_magic_link(
     background_tasks.add_task(
         send_magic_link,
         context={
-            'first_name': user.first_name,
-            'last_name': user.last_name,
-            'link': magic_link,
-            'email': user.email
-        }
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "link": magic_link,
+            "email": user.email,
+        },
     )
 
     response = success_response(
@@ -343,15 +342,14 @@ async def verify_magic_link(request: Request, token_schema: Token, db: Session =
 
     response = auth_response(
         status_code=200,
-        message='Login successful',
+        message="Login successful",
         access_token=access_token,
         data={
-            'user': jsonable_encoder(
-                user,
-                exclude=['password', 'is_deleted', 'is_verified', 'updated_at']
+            "user": jsonable_encoder(
+                user, exclude=["password", "is_deleted", "is_verified", "updated_at"]
             ),
-            'organisations': user_organizations
-        }
+            "organisations": user_organizations,
+        },
     )
 
     # Add refresh token to cookies
@@ -370,16 +368,18 @@ async def verify_magic_link(request: Request, token_schema: Token, db: Session =
 @auth.put("/password", status_code=200)
 @limiter.limit("5/minute")  # Limit to 5 requests per minute per IP
 async def change_password(
-    request: Request, 
+    request: Request,
     schema: ChangePasswordSchema,
     db: Session = Depends(get_db),
     user: User = Depends(user_service.get_current_user),
 ):
     """Endpoint to change the user's password"""
-    user_service.change_password(new_password=schema.new_password,
-                                 user=user,
-                                 db=db,
-                                 old_password=schema.old_password)
+    user_service.change_password(
+        new_password=schema.new_password,
+        user=user,
+        db=db,
+        old_password=schema.old_password,
+    )
 
     return success_response(status_code=200, message="Password changed successfully")
 
@@ -389,20 +389,123 @@ async def change_password(
           response_model=AuthMeResponse)
 @limiter.limit("5/minute")  # Limit to 5 requests per minute per IP
 def get_current_user_details(
-    request: Request, 
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(user_service.get_current_user)],
 ):
-    """Endpoint to get current user details.
-    """
+    """Endpoint to get current user details."""
     profile = profile_service.fetch_by_user_id(db, current_user.id)
     organisation = organisation_service.retrieve_user_organizations(current_user, db)
     return AuthMeResponse(
-        message='User details retrieved successfully',
+        message="User details retrieved successfully",
         status_code=200,
         data={
-            'user': UserData2.model_validate(current_user, from_attributes=True),
-            'organisations': organisation,
-            'profile': ProfileData.model_validate(profile, from_attributes=True)
-        }
+            "user": UserData2.model_validate(current_user, from_attributes=True),
+            "organisations": organisation,
+            "profile": ProfileData.model_validate(profile, from_attributes=True),
+        },
     )
+
+
+@auth.post("/setup-2fa")
+@limiter.limit("20/minute")
+def setup_2fa(
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(user_service.get_current_user)],
+):
+    """Endpoint to create a new TOTP device"""
+
+    try:
+        secret = totp_service.generate_secret()
+        schema = TOTPDeviceRequestSchema(user_id=current_user.id, secret=secret)
+        totp_service.create(db=db, schema=schema)
+        otpauth_url = totp_service.generate_otpauth_url(
+            secret=secret, user_email=current_user.email, app_name=settings.APP_NAME
+        )
+        qrcode_base64 = totp_service.generate_qrcode(otpauth_url)
+
+        response_data = TOTPDeviceResponseSchema(
+            secret=secret, 
+            otpauth_url=otpauth_url, 
+            qrcode_base64=qrcode_base64
+        )
+        
+        return success_response(
+            status_code=status.HTTP_201_CREATED,
+            message="TOTP device created successfully.",
+            data=response_data.model_dump(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error setting up 2FA: {str(e)}",
+        )
+
+
+@auth.put("/enable-2fa")
+@limiter.limit("20/minute")
+def enable_2fa(
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    token_schema: TOTPTokenSchema,
+    current_user: Annotated[User, Depends(user_service.get_current_user)],
+):
+    """Endpoint to enable a TOTP device"""
+
+    try:
+        totp_device = totp_service.verify_token(
+            db=db, 
+            user_id=current_user.id, 
+            schema=token_schema.totp_token, 
+            extra_action="enable"
+        )
+        response_data = TOTPDeviceDataSchema(user_id=totp_device.user_id, confirmed=totp_device.confirmed)
+        
+        return success_response(
+            status_code=status.HTTP_202_ACCEPTED,
+            message="TOTP device enabled successfully.",
+            data=response_data.model_dump(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error enabling totp device: {str(e)}",
+        )
+        
+
+@auth.put("/disable-2fa")
+@limiter.limit("20/minute")
+def disable_2fa(
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    token_schema: TOTPTokenSchema,
+    current_user: Annotated[User, Depends(user_service.get_current_user)],
+):
+    """Endpoint to disable a TOTP device"""
+
+    try:
+        totp_device = totp_service.verify_token(
+            db=db, 
+            user_id=current_user.id, 
+            schema=token_schema.totp_token, 
+            extra_action="disable"
+        )
+        response_data = TOTPDeviceDataSchema(user_id=totp_device.user_id, confirmed=totp_device.confirmed)
+        
+        return success_response(
+            status_code=status.HTTP_202_ACCEPTED,
+            message="TOTP device disabled successfully.",
+            data=response_data.model_dump(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error disabling totp device: {str(e)}",
+        )
